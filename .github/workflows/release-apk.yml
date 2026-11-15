@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write              # needed to create the GitHub Release
+  id-token: write              # build provenance attestation (verifiable build origin)
+  attestations: write
 
 concurrency:
   group: release-apk-${{ github.ref }}
@@ -18,6 +20,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      # 0) If repo-root-files.zip was uploaded, unpack the docs into the repo root (like the project ZIP is unpacked) and commit them.
+      #    .github/workflows/* inside it is skipped on purpose: GitHub does not let this workflow change workflow files.
+      #    Note: uploading the zip again overwrites any edits you made on GitHub to those files.
+      - name: Unpack repo-root-files.zip into the repo root
+        run: |
+          set -euo pipefail
+          Z=$(find . -maxdepth 2 -type f -iname 'repo-root-files*.zip' -not -path './.git/*' | head -1)
+          if [ -z "$Z" ]; then echo "No repo-root-files.zip found - skipping"; exit 0; fi
+          D="$RUNNER_TEMP/rootfiles"; rm -rf "$D"; mkdir -p "$D"
+          unzip -q -o "$Z" -d "$D" -x '__MACOSX/*' '.github/workflows/*'
+          cp -r "$D"/. "$GITHUB_WORKSPACE"/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          (cd "$D" && find . -type f -print0) | while IFS= read -r -d '' f; do git add -- "$f"; done
+          if git diff --cached --quiet; then echo "Docs already up to date"; else
+            git commit -m "Update docs from repo-root-files.zip"
+            git push origin "HEAD:${GITHUB_REF_NAME}" || echo "::warning::Could not push the docs (is the branch protected?). Upload the files by hand."
+          fi
 
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: "17"}
@@ -34,7 +55,7 @@ jobs:
           while IFS= read -r -d '' z; do
             t=$(git log -1 --format=%ct -- "$z" 2>/dev/null || echo 0); t=${t:-0}
             if [ "$t" -ge "$BEST" ]; then BEST=$t; ZIP=$z; fi
-          done < <(find . -maxdepth 3 -type f -iname '*.zip' -not -path './.git/*' -not -path './_project/*' -print0)
+          done < <(find . -maxdepth 3 -type f -iname '*.zip' -not -iname 'repo-root-files*.zip' -not -path './.git/*' -not -path './_project/*' -print0)
 
           if [ -n "$ZIP" ]; then
             echo "Extracting project ZIP: $ZIP"
@@ -108,27 +129,96 @@ jobs:
           if grep -qi "Android Debug" "$RUNNER_TEMP/sign.txt"; then echo "::error::APK is signed with a debug key"; exit 1; fi
           echo "APK_SRC=$APK" >> "$GITHUB_ENV"
 
-      - name: Name the APK
+      # 3b) The release certificate must never change between versions (Play Protect reputation, updates and Firebase sign-in all depend on it).
+      #     One-time setup: Settings > Secrets and variables > Actions > Variables > New variable  EXPECTED_CERT_SHA256 = the SHA-256 printed by the first good build.
+      - name: Check release certificate fingerprint
+        env:
+          EXPECTED_CERT_SHA256: ${{ vars.EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          CERT=$(grep -m1 -i 'certificate SHA-256 digest' "$RUNNER_TEMP/sign.txt" | awk '{print $NF}' | tr 'A-F' 'a-f')
+          [ -n "$CERT" ] || { echo "::error::Could not read the signing certificate SHA-256"; exit 1; }
+          echo "CERT_SHA256=$CERT" >> "$GITHUB_ENV"
+          EXP=$(printf '%s' "${EXPECTED_CERT_SHA256:-}" | tr -d ': \r\n' | tr 'A-F' 'a-f')
+          if [ -z "$EXP" ]; then
+            echo "::warning::Variable EXPECTED_CERT_SHA256 is not set, so certificate consistency is NOT enforced. Set it to: $CERT"
+          elif [ "$EXP" != "$CERT" ]; then
+            echo "::error::Signing certificate changed. Expected $EXP but this build is signed with $CERT. Stopping so users are not given an APK that cannot update the installed app."; exit 1
+          fi
+
+      # 3c) Package identity + permission report (also shown on the run summary page).
+      - name: Check package identity and permissions
+        env:
+          EXPECTED_PACKAGE: com.a2z.ai
+        run: |
+          set -euo pipefail
+          BT=$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          "$BT/aapt2" dump badging "$APK_SRC" > "$RUNNER_TEMP/badging.txt"
+          PKG=$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" "$RUNNER_TEMP/badging.txt" | head -1)
+          VER=$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" "$RUNNER_TEMP/badging.txt" | head -1)
+          TSDK=$(sed -n "s/^targetSdkVersion:'\([0-9]*\)'.*/\1/p" "$RUNNER_TEMP/badging.txt" | head -1)
+          [ "$PKG" = "$EXPECTED_PACKAGE" ] || { echo "::error::Package name is '$PKG' but must stay '$EXPECTED_PACKAGE'"; exit 1; }
+          {
+            echo "### APK identity"
+            echo "- Package: $PKG"
+            echo "- Version name: $VER"
+            echo "- Target SDK: $TSDK"
+            echo "- Signing certificate SHA-256: $CERT_SHA256"
+            echo ""
+            echo "### Permissions in this APK"
+            grep -E "^uses-permission" "$RUNNER_TEMP/badging.txt" | sed "s/^/- /"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Name the APK and create SHA-256 checksum
         run: |
           set -euo pipefail
           TAG="v1.0.${GITHUB_RUN_NUMBER}"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           cp "$APK_SRC" "$GITHUB_WORKSPACE/Zyn-Ai-${TAG}.apk"
+          cd "$GITHUB_WORKSPACE"
+          sha256sum "Zyn-Ai-${TAG}.apk" > "Zyn-Ai-${TAG}.apk.sha256"
+          APK_SHA256=$(cut -d' ' -f1 "Zyn-Ai-${TAG}.apk.sha256")
+          echo "APK_SHA256=$APK_SHA256" >> "$GITHUB_ENV"
+          echo "APK SHA-256: $APK_SHA256"
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Signed release APK (build #${GITHUB_RUN_NUMBER}, commit ${GITHUB_SHA::7}).
+
+          Package name: com.a2z.ai
+
+          APK SHA-256:
+          ${APK_SHA256}
+
+          Signing certificate SHA-256 (the same on every genuine Zyn Ai release):
+          ${CERT_SHA256}
+
+          How to check your download: compute the SHA-256 of the file and compare it with the value above, or with the attached .sha256 file. See VERIFY.md in the repository.
+
+          About Google Play Protect: Zyn Ai is distributed outside Google Play. Play Protect may warn about apps from new developers and about apps that use the Accessibility service. Zyn Ai does not try to bypass or disable Play Protect. What the app does and why it needs each permission is listed in PERMISSIONS.md; the privacy policy is PRIVACY_POLICY.md.
+          EOF
 
       # 4) Shows under the run page > Artifacts as "Zyn-Ai-Release-APK".
       - name: Upload APK to run Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Zyn-Ai-Release-APK
-          path: Zyn-Ai-${{ env.TAG }}.apk
+          path: |
+            Zyn-Ai-${{ env.TAG }}.apk
+            Zyn-Ai-${{ env.TAG }}.apk.sha256
           if-no-files-found: error
           retention-days: 30
 
-      # 5) Also publish under GitHub Releases (direct .apk download).
+      # 4b) Signed statement from GitHub that this APK was built by this workflow from this commit (public repositories).
+      - name: Attest build provenance
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: Zyn-Ai-${{ env.TAG }}.apk
+
+      # 5) Also publish under GitHub Releases (direct .apk download + checksum).
       - name: Publish APK as a GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" "Zyn-Ai-${TAG}.apk" --repo "$GITHUB_REPOSITORY" --title "Zyn Ai ${TAG}" --notes "Signed release APK (build #${GITHUB_RUN_NUMBER}, commit ${GITHUB_SHA::7})" --target "$GITHUB_SHA" \
-            || gh release upload "$TAG" "Zyn-Ai-${TAG}.apk" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release create "$TAG" "Zyn-Ai-${TAG}.apk" "Zyn-Ai-${TAG}.apk.sha256" --repo "$GITHUB_REPOSITORY" --title "Zyn Ai ${TAG}" --notes-file "$RUNNER_TEMP/notes.md" --target "$GITHUB_SHA" \
+            || { gh release upload "$TAG" "Zyn-Ai-${TAG}.apk" "Zyn-Ai-${TAG}.apk.sha256" --repo "$GITHUB_REPOSITORY" --clobber; gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/notes.md"; }

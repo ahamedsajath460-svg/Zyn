@@ -68,42 +68,24 @@ jobs:
           test -s "$RUNNER_TEMP/a2z-release.jks" || { echo "::error::KEYSTORE_BASE64 decoded to an empty file"; exit 1; }
 
       # 2b) Built-in API keys -> assets/default-keys.json inside the APK (the app works right after first open).
-      #     Secrets (each is optional; empty ones are skipped):
-      #       POLLINATIONS_KEY_1..4  -> text chat + image generation
-      #       GEMINI_KEY_1..4        -> chat, screen sharing / understanding / live assistance / AI screen control
-      #       TAVILY_KEY_1..2        -> web search / research
-      #       AI_KEYS (old, optional) -> extra keys, one per line, optionally "provider:key"
+      #     ONE secret named AI_API holds every key, one per line as  provider:key  (provider = pollinations, openrouter, gemini, groq, tavily, youtube).
+      #     The line order is the fallback order: the first text provider is the primary one. Lines starting with #, empty lines, lines with PASTE_KEY and lines with no key after the colon are ignored.
+      #     (Old secret AI_KEYS, if it still exists, is added after AI_API.)
       - name: Add built-in API keys from secrets
         env:
-          POLLINATIONS_KEY_1: ${{ secrets.POLLINATIONS_KEY_1 }}
-          POLLINATIONS_KEY_2: ${{ secrets.POLLINATIONS_KEY_2 }}
-          POLLINATIONS_KEY_3: ${{ secrets.POLLINATIONS_KEY_3 }}
-          POLLINATIONS_KEY_4: ${{ secrets.POLLINATIONS_KEY_4 }}
-          GEMINI_KEY_1: ${{ secrets.GEMINI_KEY_1 }}
-          GEMINI_KEY_2: ${{ secrets.GEMINI_KEY_2 }}
-          GEMINI_KEY_3: ${{ secrets.GEMINI_KEY_3 }}
-          GEMINI_KEY_4: ${{ secrets.GEMINI_KEY_4 }}
-          TAVILY_KEY_1: ${{ secrets.TAVILY_KEY_1 }}
-          TAVILY_KEY_2: ${{ secrets.TAVILY_KEY_2 }}
+          AI_API: ${{ secrets.AI_API }}
           AI_KEYS: ${{ secrets.AI_KEYS }}
         run: |
           set -euo pipefail
           OUT="$PROJECT_DIR/app/src/main/assets/default-keys.json"
           mkdir -p "$(dirname "$OUT")"
           LINES="$RUNNER_TEMP/keys.txt"; : > "$LINES"
-          add() { # add <provider> <secret-name-prefix> <count>
-            for i in $(seq 1 "$3"); do
-              v="$2_$i"; val="${!v:-}"
-              val=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-              if [ -n "$val" ]; then printf '%s:%s\n' "$1" "$val" >> "$LINES"; else echo "::warning::Secret $v is empty - skipped"; fi
-            done
-          }
-          add pollinations POLLINATIONS_KEY 4
-          add gemini GEMINI_KEY 4
-          add tavily TAVILY_KEY 2
-          if [ -n "${AI_KEYS:-}" ]; then printf '%s\n' "$AI_KEYS" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v -E '^(#|$)' >> "$LINES" || true; fi
-          if [ -s "$LINES" ]; then jq -R . < "$LINES" | jq -s . > "$OUT"; else echo '[]' > "$OUT"; echo "::warning::No API key secrets set - APK will have no built-in keys"; fi
-          echo "Built-in keys: pollinations=$(grep -c '^pollinations:' "$LINES" || true) gemini=$(grep -c '^gemini:' "$LINES" || true) tavily=$(grep -c '^tavily:' "$LINES" || true) total=$(jq length "$OUT")"
+          for S in "${AI_API:-}" "${AI_KEYS:-}"; do
+            [ -n "$S" ] && printf '%s\n' "$S" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v -E '^(#|$)' | grep -v -i -E 'PASTE_KEY|^[A-Za-z]+[[:space:]]*[:=][[:space:]]*$' >> "$LINES" || true
+          done
+          if [ -s "$LINES" ]; then jq -R . < "$LINES" | jq -s . > "$OUT"; else echo '[]' > "$OUT"; echo "::warning::Secret AI_API is empty or missing - APK will have no built-in keys"; fi
+          echo "Built-in keys: pollinations=$(grep -ci '^pollinations[:=]' "$LINES" || true) openrouter=$(grep -ci '^openrouter[:=]' "$LINES" || true) gemini=$(grep -ci '^gemini[:=]' "$LINES" || true) groq=$(grep -ci '^groq[:=]' "$LINES" || true) tavily=$(grep -ci '^tavily[:=]' "$LINES" || true) youtube=$(grep -ci '^youtube[:=]' "$LINES" || true) total=$(jq length "$OUT")"
+          if grep -v -i -E '^(pollinations|openrouter|gemini|groq|tavily|youtube|nvidia|deepseek|openai|mistral)[[:space:]]*[:=]' "$LINES" | grep -q .; then echo "::warning::Some lines in AI_API have no provider: prefix - the app will guess the provider from the key shape (YouTube and Tavily keys need the prefix)"; fi
           rm -f "$LINES"
 
       # 3) Signed release build (app/build.gradle.kts reads these env vars).

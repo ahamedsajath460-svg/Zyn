@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 0) If repo-root-files.zip was uploaded, unpack the docs into the repo root (like the project ZIP is unpacked) and commit them.
       #    .github/workflows/* inside it is skipped on purpose: GitHub does not let this workflow change workflow files.

@@ -90,6 +90,7 @@ jobs:
 
       # 2b) Built-in API keys -> assets/default-keys.json inside the APK (the app works right after first open).
       #     ONE secret named AI_API holds every key, one per line as  provider:key  (provider = pollinations, openrouter, gemini, groq, tavily, youtube).
+      #     NOTE: the pollinations key in this secret is used for TEXT chat only. The app never uses it for image or video generation; users must add their own Pollinations key (Settings > AI providers) to make images or videos.
       #     The line order is the fallback order: the first text provider is the primary one. Lines starting with #, empty lines, lines with PASTE_KEY and lines with no key after the colon are ignored.
       #     (Old secret AI_KEYS, if it still exists, is added after AI_API.)
       - name: Add built-in API keys from secrets
@@ -174,10 +175,10 @@ jobs:
           set -euo pipefail
           TAG="v1.0.${GITHUB_RUN_NUMBER}"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
-          cp "$APK_SRC" "$GITHUB_WORKSPACE/Zyn-Ai-${TAG}.apk"
+          cp "$APK_SRC" "$GITHUB_WORKSPACE/Zen-Ai-${TAG}.apk"
           cd "$GITHUB_WORKSPACE"
-          sha256sum "Zyn-Ai-${TAG}.apk" > "Zyn-Ai-${TAG}.apk.sha256"
-          APK_SHA256=$(cut -d' ' -f1 "Zyn-Ai-${TAG}.apk.sha256")
+          sha256sum "Zen-Ai-${TAG}.apk" > "Zen-Ai-${TAG}.apk.sha256"
+          APK_SHA256=$(cut -d' ' -f1 "Zen-Ai-${TAG}.apk.sha256")
           echo "APK_SHA256=$APK_SHA256" >> "$GITHUB_ENV"
           echo "APK SHA-256: $APK_SHA256"
           cat > "$RUNNER_TEMP/notes.md" <<EOF
@@ -188,22 +189,22 @@ jobs:
           APK SHA-256:
           ${APK_SHA256}
 
-          Signing certificate SHA-256 (the same on every genuine Zyn Ai release):
+          Signing certificate SHA-256 (the same on every genuine Zen Ai release):
           ${CERT_SHA256}
 
           How to check your download: compute the SHA-256 of the file and compare it with the value above, or with the attached .sha256 file. See VERIFY.md in the repository.
 
-          About Google Play Protect: Zyn Ai is distributed outside Google Play. Play Protect may warn about apps from new developers and about apps that use the Accessibility service. Zyn Ai does not try to bypass or disable Play Protect. What the app does and why it needs each permission is listed in PERMISSIONS.md; the privacy policy is PRIVACY_POLICY.md.
+          About Google Play Protect: Zen Ai is distributed outside Google Play. Play Protect may warn about apps from new developers and about apps that use the Accessibility service. Zen Ai does not try to bypass or disable Play Protect. What the app does and why it needs each permission is listed in PERMISSIONS.md; the privacy policy is PRIVACY_POLICY.md.
           EOF
 
-      # 4) Shows under the run page > Artifacts as "Zyn-Ai-Release-APK".
+      # 4) Shows under the run page > Artifacts as "Zen-Ai-Release-APK".
       - name: Upload APK to run Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Zyn-Ai-Release-APK
+          name: Zen-Ai-Release-APK
           path: |
-            Zyn-Ai-${{ env.TAG }}.apk
-            Zyn-Ai-${{ env.TAG }}.apk.sha256
+            Zen-Ai-${{ env.TAG }}.apk
+            Zen-Ai-${{ env.TAG }}.apk.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -212,7 +213,7 @@ jobs:
         continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: Zyn-Ai-${{ env.TAG }}.apk
+          subject-path: Zen-Ai-${{ env.TAG }}.apk
 
       # 5) Also publish under GitHub Releases (direct .apk download + checksum).
       - name: Publish APK as a GitHub Release
@@ -220,5 +221,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" "Zyn-Ai-${TAG}.apk" "Zyn-Ai-${TAG}.apk.sha256" --repo "$GITHUB_REPOSITORY" --title "Zyn Ai ${TAG}" --notes-file "$RUNNER_TEMP/notes.md" --target "$GITHUB_SHA" \
-            || { gh release upload "$TAG" "Zyn-Ai-${TAG}.apk" "Zyn-Ai-${TAG}.apk.sha256" --repo "$GITHUB_REPOSITORY" --clobber; gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/notes.md"; }
+          gh release create "$TAG" "Zen-Ai-${TAG}.apk" "Zen-Ai-${TAG}.apk.sha256" --repo "$GITHUB_REPOSITORY" --title "Zen Ai ${TAG}" --notes-file "$RUNNER_TEMP/notes.md" --target "$GITHUB_SHA" \
+            || { gh release upload "$TAG" "Zen-Ai-${TAG}.apk" "Zen-Ai-${TAG}.apk.sha256" --repo "$GITHUB_REPOSITORY" --clobber; gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/notes.md"; }

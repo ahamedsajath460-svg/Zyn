@@ -199,7 +199,7 @@ jobs:
 
       # 4) Shows under the run page > Artifacts as "Zen-Ai-Release-APK".
       - name: Upload APK to run Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Zen-Ai-Release-APK
           path: |

@@ -1,0 +1,95 @@
+# Zen AI Cloud Studio - signed release APK.
+# Repository root file: .github/workflows/cloud-android-release.yml
+# Job 1 builds an UNSIGNED release APK with no secrets. Job 2 signs it with apksigner. Gradle never sees the keystore.
+# One-time setup (Settings > Secrets and variables > Actions):
+#   Secrets:   CLOUD_KEYSTORE_BASE64, CLOUD_KEYSTORE_PASSWORD, CLOUD_KEY_ALIAS, CLOUD_KEY_PASSWORD   (a SEPARATE key for generated apps, not the Zen AI key)
+#   Variable:  CLOUD_EXPECTED_CERT_SHA256  (optional but recommended: stops a changed signing identity)
+name: Cloud Android Release
+run-name: "zen-cloud ${{ inputs.build_id }} release"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:       { description: "Build id", required: true, type: string }
+      project_dir:    { description: "Project folder", required: true, type: string }
+      gradle_version: { description: "Gradle version", required: false, type: string, default: "8.7" }
+      sdk_packages:   { description: "Extra SDK packages", required: false, type: string, default: "" }
+      retention_days: { description: "Artifact retention (1-30 days)", required: false, type: string, default: "7" }
+
+concurrency:
+  group: zen-cloud-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/cloud-android-build.yml
+    with:
+      build_id: ${{ inputs.build_id }}
+      project_dir: ${{ inputs.project_dir }}
+      variant: release
+      gradle_version: ${{ inputs.gradle_version }}
+      sdk_packages: ${{ inputs.sdk_packages }}
+      retention_days: ${{ inputs.retention_days }}
+
+  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BUILD_ID: ${{ inputs.build_id }}
+    steps:
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cloud-apk-${{ inputs.build_id }}
+          path: in
+
+      - name: Sign, align and verify
+        env:
+          KS_B64: ${{ secrets.CLOUD_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.CLOUD_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.CLOUD_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.CLOUD_KEY_PASSWORD }}
+          EXPECTED: ${{ vars.CLOUD_EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          for v in KS_B64 KS_PASS KS_ALIAS KEY_PASS; do
+            if [ -z "${!v}" ]; then echo "::error::Release signing is not set up: a CLOUD_* secret is missing (see the comment at the top of this workflow)."; exit 1; fi
+          done
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          SRC=$(ls in/*.apk | head -1); NAME=$(basename "$SRC" .apk); NAME=${NAME%-unsigned}
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"; test -s "$RUNNER_TEMP/release.jks"
+          "$BT/zipalign" -p -f 4 "$SRC" "$RUNNER_TEMP/aligned.apk"
+          mkdir -p out
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/release.jks" --ks-key-alias "$KS_ALIAS" --ks-pass env:KS_PASS --key-pass env:KEY_PASS --out "out/$NAME-signed.apk" "$RUNNER_TEMP/aligned.apk"
+          rm -f "$RUNNER_TEMP/release.jks"
+          "$BT/apksigner" verify --verbose --print-certs "out/$NAME-signed.apk" | tee "$RUNNER_TEMP/sign.txt" | grep -E "Verifies|Verified using|SHA-256 digest" | grep -v "Signer #[0-9]* public key" || true
+          grep -q "^Verifies" "$RUNNER_TEMP/sign.txt" || { echo "::error::APK signature did not verify"; exit 1; }
+          if grep -qi "Android Debug" "$RUNNER_TEMP/sign.txt"; then echo "::error::Signed with a debug key"; exit 1; fi
+          CERT=$(grep -m1 -i 'certificate SHA-256 digest' "$RUNNER_TEMP/sign.txt" | awk '{print $NF}' | tr 'A-F' 'a-f')
+          EXP=$(printf '%s' "${EXPECTED:-}" | tr -d ': \r\n' | tr 'A-F' 'a-f')
+          if [ -z "$EXP" ]; then echo "::warning::CLOUD_EXPECTED_CERT_SHA256 is not set, so the signing identity is NOT enforced. Set it to: $CERT"
+          elif [ "$EXP" != "$CERT" ]; then echo "::error::Signing certificate changed (expected $EXP, got $CERT)"; exit 1; fi
+          ( cd out && sha256sum "$NAME-signed.apk" > "$NAME-signed.apk.sha256" )
+          python3 - "$NAME" "$CERT" <<'PY'
+          import json, os, sys, hashlib
+          n, cert = sys.argv[1], sys.argv[2]
+          p = "out/%s-signed.apk" % n
+          info = json.load(open("in/build-info.json"))
+          info.update({"signing": "release key", "cert_sha256": cert, "apks": [{"name": os.path.basename(p), "size": os.path.getsize(p), "sha256": hashlib.sha256(open(p, "rb").read()).hexdigest(), "package": (info["apks"][0].get("package", "") if info.get("apks") else ""), "versionName": (info["apks"][0].get("versionName", "") if info.get("apks") else "")}]})
+          json.dump(info, open("out/build-info.json", "w"), indent=2)
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("### Signed release APK\n- File: %s\n- SHA-256: `%s`\n- Signing certificate SHA-256: `%s`\n" % (os.path.basename(p), info["apks"][0]["sha256"], cert))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cloud-signed-${{ inputs.build_id }}
+          path: out/
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error

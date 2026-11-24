@@ -69,7 +69,7 @@ jobs:
           sudo udevadm control --reload-rules; sudo udevadm trigger --name-match=kvm || true
           if [ ! -e /dev/kvm ]; then echo "::error::This runner has no /dev/kvm, so an Android emulator cannot run here. Use a public repository, a larger runner, or an external emulator service (see docs/cloud-studio/SETUP_PHONE.md)."; exit 1; fi
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with: { distribution: temurin, java-version: "17" }
 
       - name: Run app in Android emulator

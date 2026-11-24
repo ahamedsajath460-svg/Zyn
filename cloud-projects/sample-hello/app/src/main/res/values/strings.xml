@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Sample Hello</string>
+    <string name="hello">Hello from Zen AI Cloud Studio</string>
+    <string name="tap_me">Tap me</string>
+    <string name="clicked">Clicked %1$d times</string>
+</resources>

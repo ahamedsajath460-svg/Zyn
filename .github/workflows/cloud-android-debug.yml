@@ -1,0 +1,32 @@
+# Zen AI Cloud Studio - debug APK (signed automatically with the Android debug key).
+# Repository root file: .github/workflows/cloud-android-debug.yml
+name: Cloud Android Debug
+run-name: "zen-cloud ${{ inputs.build_id }} debug"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:       { description: "Build id", required: true, type: string }
+      project_dir:    { description: "Project folder, e.g. cloud-projects/sample-hello", required: true, type: string }
+      gradle_version: { description: "Gradle version", required: false, type: string, default: "8.7" }
+      sdk_packages:   { description: "Extra SDK packages", required: false, type: string, default: "" }
+      retention_days: { description: "Artifact retention (1-30 days)", required: false, type: string, default: "7" }
+
+concurrency:
+  group: zen-cloud-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/cloud-android-build.yml
+    with:
+      build_id: ${{ inputs.build_id }}
+      project_dir: ${{ inputs.project_dir }}
+      variant: debug
+      gradle_version: ${{ inputs.gradle_version }}
+      sdk_packages: ${{ inputs.sdk_packages }}
+      retention_days: ${{ inputs.retention_days }}

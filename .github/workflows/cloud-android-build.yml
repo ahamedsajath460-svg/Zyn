@@ -77,7 +77,7 @@ jobs:
         id: validate
         run: python3 tools/cloud/validate_project.py "$PROJECT_DIR" --github-output
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with: { distribution: temurin, java-version: "17" }
 
       - uses: gradle/actions/setup-gradle@v4

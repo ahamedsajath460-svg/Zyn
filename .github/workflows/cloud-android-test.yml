@@ -1,0 +1,98 @@
+# Zen AI Cloud Studio - real Android emulator test on a GitHub-hosted runner.
+# Repository root file: .github/workflows/cloud-android-test.yml
+# Builds the debug APK, boots an Android emulator (needs /dev/kvm), installs and launches the app, takes screenshots,
+# runs a seeded random UI test (monkey), restarts the app, collects logcat and reports crashes.
+# This is a BATCH test run. It is not a live, touchable, streamed device (GitHub Actions cannot stream one).
+name: Cloud Android Test
+run-name: "zen-cloud ${{ inputs.build_id }} test"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:       { description: "Build id", required: true, type: string }
+      project_dir:    { description: "Project folder", required: true, type: string }
+      api_level:      { description: "Android API level of the virtual device", required: false, type: choice, options: ["34", "33", "30"], default: "34" }
+      ui_events:      { description: "Random UI events (50-2000)", required: false, type: string, default: "300" }
+      gradle_version: { description: "Gradle version", required: false, type: string, default: "8.7" }
+      sdk_packages:   { description: "Extra SDK packages", required: false, type: string, default: "" }
+      retention_days: { description: "Artifact retention (1-30 days)", required: false, type: string, default: "7" }
+
+concurrency:
+  group: zen-cloud-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/cloud-android-build.yml
+    with:
+      build_id: ${{ inputs.build_id }}
+      project_dir: ${{ inputs.project_dir }}
+      variant: debug
+      gradle_version: ${{ inputs.gradle_version }}
+      sdk_packages: ${{ inputs.sdk_packages }}
+      retention_days: ${{ inputs.retention_days }}
+
+  emulator:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BUILD_ID: ${{ inputs.build_id }}
+      EVENTS: ${{ inputs.ui_events }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cloud-apk-${{ inputs.build_id }}
+          path: in
+
+      - name: Read APK info
+        run: |
+          set -euo pipefail
+          [[ "$EVENTS" =~ ^[0-9]{2,4}$ && "$EVENTS" -ge 50 && "$EVENTS" -le 2000 ]] || { echo "::error::ui_events must be 50-2000"; exit 1; }
+          python3 - >> "$GITHUB_ENV" <<'PY'
+          import json
+          a = json.load(open("in/build-info.json"))["apks"][0]
+          print("APK=in/" + a["name"]); print("PKG=" + a["package"])
+          PY
+          grep -q '^PKG=.\+' "$GITHUB_ENV" || { echo "::error::Could not read the package name (aapt2 missing?)"; exit 1; }
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules; sudo udevadm trigger --name-match=kvm || true
+          if [ ! -e /dev/kvm ]; then echo "::error::This runner has no /dev/kvm, so an Android emulator cannot run here. Use a public repository, a larger runner, or an external emulator service (see docs/cloud-studio/SETUP_PHONE.md)."; exit 1; fi
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+
+      - name: Run app in Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ inputs.api_level }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash tools/cloud/emulator-smoke.sh "$APK" "$PKG" emu-out "$EVENTS"
+
+      - name: Summary
+        if: always()
+        run: |
+          { echo "### Emulator test"; echo "- API level: ${{ inputs.api_level }}"; echo "- Package: $PKG"
+            if [ -s emu-out/crash-report.txt ]; then echo "- Result: **CRASH / FAILURE**"; echo '```'; head -40 emu-out/crash-report.txt; echo '```'; else echo "- Result: no crash detected"; fi; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cloud-emu-${{ inputs.build_id }}
+          path: emu-out/
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: ignore

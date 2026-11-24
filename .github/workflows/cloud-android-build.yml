@@ -137,7 +137,7 @@ jobs:
 
       - name: Upload APK
         if: steps.gradle.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cloud-apk-${{ inputs.build_id }}
           path: out/
@@ -146,7 +146,7 @@ jobs:
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cloud-log-${{ inputs.build_id }}
           path: build.log

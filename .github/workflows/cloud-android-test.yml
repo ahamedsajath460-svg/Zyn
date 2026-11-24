@@ -89,7 +89,7 @@ jobs:
           { echo "### Emulator test"; echo "- API level: ${{ inputs.api_level }}"; echo "- Package: $PKG"
             if [ -s emu-out/crash-report.txt ]; then echo "- Result: **CRASH / FAILURE**"; echo '```'; head -40 emu-out/crash-report.txt; echo '```'; else echo "- Result: no crash detected"; fi; } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: cloud-emu-${{ inputs.build_id }}

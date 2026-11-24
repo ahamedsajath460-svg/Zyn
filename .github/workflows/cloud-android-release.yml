@@ -87,7 +87,7 @@ jobs:
           open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("### Signed release APK\n- File: %s\n- SHA-256: `%s`\n- Signing certificate SHA-256: `%s`\n" % (os.path.basename(p), info["apks"][0]["sha256"], cert))
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cloud-signed-${{ inputs.build_id }}
           path: out/

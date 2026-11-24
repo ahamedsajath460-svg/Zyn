@@ -1,0 +1,27 @@
+name: Unpack cloud support
+run-name: "unpack cloud-support.zip"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unzip and commit
+        run: |
+          set -euo pipefail
+          test -f cloud-support.zip || { echo "cloud-support.zip not found in repo root"; exit 1; }
+          unzip -o cloud-support.zip
+          chmod +x tools/cloud/*.sh || true
+          rm cloud-support.zip
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tools/cloud cloud-projects/sample-hello
+          git add -u cloud-support.zip || true
+          git commit -m "Add cloud tools and sample-hello project"
+          git push

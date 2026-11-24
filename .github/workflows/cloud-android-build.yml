@@ -1,0 +1,154 @@
+# Zen AI Cloud Studio - core build workflow (reusable + manual).
+# Repository root file: .github/workflows/cloud-android-build.yml
+# Builds an Android project that Zen AI committed under cloud-projects/<name>/ and uploads APK + log artifacts.
+# The build job has NO secrets and a read-only token. Signing happens in cloud-android-release.yml, in a separate job.
+name: Cloud Android Build
+run-name: "zen-cloud ${{ inputs.build_id }} ${{ inputs.variant }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:       { description: "Build id (letters, digits, - _)", required: true, type: string }
+      project_dir:    { description: "Project folder, e.g. cloud-projects/sample-hello", required: true, type: string }
+      variant:        { description: "debug or release (release = unsigned APK)", required: false, type: choice, options: [debug, release], default: debug }
+      gradle_version: { description: "Gradle version", required: false, type: string, default: "8.7" }
+      sdk_packages:   { description: "Extra Android SDK packages (space separated, e.g. 'platforms;android-35')", required: false, type: string, default: "" }
+      retention_days: { description: "Keep artifacts this many days (1-30)", required: false, type: string, default: "7" }
+  workflow_call:
+    inputs:
+      build_id:       { required: true, type: string }
+      project_dir:    { required: true, type: string }
+      variant:        { required: false, type: string, default: debug }
+      gradle_version: { required: false, type: string, default: "8.7" }
+      sdk_packages:   { required: false, type: string, default: "" }
+      retention_days: { required: false, type: string, default: "7" }
+    outputs:
+      apk_name:   { value: "${{ jobs.build.outputs.apk_name }}" }
+      apk_sha256: { value: "${{ jobs.build.outputs.apk_sha256 }}" }
+      package:    { value: "${{ jobs.build.outputs.package }}" }
+
+# One cloud build at a time per repository (a newer waiting build replaces an older waiting one).
+# When this file is called from another workflow, that caller owns the group, so the inner group is unique.
+concurrency:
+  group: ${{ github.workflow == 'Cloud Android Build' && format('zen-cloud-{0}', github.repository) || format('zen-cloud-inner-{0}-{1}', github.repository, github.run_id) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      apk_name: ${{ steps.collect.outputs.apk_name }}
+      apk_sha256: ${{ steps.collect.outputs.apk_sha256 }}
+      package: ${{ steps.collect.outputs.package }}
+    env:
+      BUILD_ID: ${{ inputs.build_id }}
+      PROJECT_DIR: ${{ inputs.project_dir }}
+      VARIANT: ${{ inputs.variant }}
+      GRADLE_VERSION: ${{ inputs.gradle_version }}
+      SDK_PACKAGES: ${{ inputs.sdk_packages }}
+      RETENTION: ${{ inputs.retention_days }}
+    steps:
+      # Every input is checked here; later steps only read them through env variables (never pasted into scripts).
+      - name: Check inputs
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_ID" =~ ^[A-Za-z0-9_-]{4,40}$ ]] || { echo "::error::Bad build_id"; exit 1; }
+          [[ "$PROJECT_DIR" =~ ^cloud-projects/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ && "$PROJECT_DIR" != *..* ]] || { echo "::error::project_dir must be inside cloud-projects/"; exit 1; }
+          [[ "$VARIANT" == "debug" || "$VARIANT" == "release" ]] || { echo "::error::variant must be debug or release"; exit 1; }
+          [[ "$GRADLE_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad Gradle version"; exit 1; }
+          [[ "$RETENTION" =~ ^([1-9]|[12][0-9]|30)$ ]] || { echo "::error::retention_days must be 1-30"; exit 1; }
+          if [ -n "$SDK_PACKAGES" ]; then
+            [[ ${#SDK_PACKAGES} -le 300 ]] || { echo "::error::sdk_packages too long"; exit 1; }
+            for p in $SDK_PACKAGES; do
+              [[ "$p" =~ ^(platforms|build-tools|ndk|cmake|sources)\;[A-Za-z0-9._-]+$ || "$p" == "platform-tools" ]] || { echo "::error::SDK package not allowed: $p"; exit 1; }
+            done
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate project (static guard)
+        id: validate
+        run: python3 tools/cloud/validate_project.py "$PROJECT_DIR" --github-output
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ inputs.gradle_version }}
+          cache-read-only: false
+
+      - name: Install Android SDK packages
+        env:
+          COMPILE_SDK: ${{ steps.validate.outputs.compile_sdk }}
+        run: |
+          set -euo pipefail
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | tail -1)
+          yes | "$SDKM" --licenses > /dev/null || true
+          PKGS=("platform-tools" "platforms;android-${COMPILE_SDK:-34}" "build-tools;34.0.0")
+          for p in $SDK_PACKAGES; do PKGS+=("$p"); done
+          "$SDKM" --install "${PKGS[@]}" 2>&1 | tail -n 25
+          { echo "### Android SDK packages"; echo '```'; "$SDKM" --list_installed 2>/dev/null | sed -n '1,40p'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gradle build
+        id: gradle
+        timeout-minutes: 35
+        env:
+          APP_MODULE: ${{ steps.validate.outputs.app_module }}
+        run: |
+          set -uo pipefail
+          MOD=":${APP_MODULE//\//:}"; [ "$APP_MODULE" = "." ] && MOD=""
+          if [ "$VARIANT" = "release" ]; then TASK="${MOD}:assembleRelease"; else TASK="${MOD}:assembleDebug"; fi
+          [ -z "$MOD" ] && TASK="${TASK#:}"
+          echo "Running: gradle -p $PROJECT_DIR $TASK (Gradle $GRADLE_VERSION, project wrapper ignored)"
+          gradle -p "$PROJECT_DIR" "$TASK" --no-daemon --console=plain --stacktrace --warning-mode=summary 2>&1 | python3 tools/cloud/cloud_tools.py redact | tee build.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Report errors as annotations
+        if: always() && steps.gradle.outcome == 'failure'
+        run: python3 tools/cloud/cloud_tools.py annotate build.log "$PROJECT_DIR"
+
+      - name: Collect APK, checksum and build info
+        id: collect
+        if: steps.gradle.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 tools/cloud/cloud_tools.py collect "$PROJECT_DIR" out "$VARIANT" "$BUILD_ID" "$GRADLE_VERSION" "$SDK_PACKAGES" | tee collect.json
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          i = json.load(open("collect.json")); a = i["apks"][0]
+          print("apk_name=" + a["name"]); print("apk_sha256=" + a["sha256"]); print("package=" + a.get("package", ""))
+          PY
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          i = json.load(open("collect.json"))
+          print("### Build result"); print("| APK | Size | Package | Version | SHA-256 |"); print("|---|---|---|---|---|")
+          for a in i["apks"]: print("| %s | %s | %s | %s | `%s` |" % (a["name"], a["size"], a.get("package", ""), a.get("versionName", ""), a["sha256"]))
+          print("\nSigning: " + i["signing"])
+          PY
+
+      - name: Upload APK
+        if: steps.gradle.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-apk-${{ inputs.build_id }}
+          path: out/
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-log-${{ inputs.build_id }}
+          path: build.log
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: ignore
